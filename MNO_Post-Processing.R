@@ -1,0 +1,284 @@
+library(dplyr)
+library(tidyr)
+library(rio)
+# Loading the data --------------------------------------------------------
+
+
+antennas_info <- read.csv('AntennaInfo_MNO_MNO1.csv')
+antennas <- read.csv('antennas.csv')
+persons <- read.csv('persons.csv')
+head(antennas_info)
+head(persons)
+
+
+# Checking how many unique phones there are -------------------------------
+
+
+phone_counts <- persons %>%
+  group_by(Person.ID) %>%
+  summarise(phones = unique(`Mobile.Phone.s..ID`)) %>%
+  mutate(
+    phone_count = case_when(
+      phones == "" ~ 0,  # No phone
+      grepl("-", phones) ~ 2,  # Two phones (contains '-')
+      TRUE ~ 1  # One phone
+    )
+  )
+
+# Counting how many ppl are in each category
+
+no_phone <- sum(phone_counts$phone_count == 0)
+one_phone <- sum(phone_counts$phone_count == 1)
+two_phones <- sum(phone_counts$phone_count == 2)
+
+# Output the results
+cat("No phone:", no_phone, "\n")
+cat("One phone:", one_phone, "\n")
+cat("Two phones:", two_phones, "\n")
+
+
+# Joining the data for dataset1--------------------------------------------------------
+
+
+phones <- persons %>%
+  select(t, Mobile.Phone.s..ID) %>%
+  mutate(Mobile.Phone.s..ID = as.character(Mobile.Phone.s..ID)) %>%
+  separate_rows(Mobile.Phone.s..ID, sep = "-") %>%
+  filter(!is.na(Mobile.Phone.s..ID) & Mobile.Phone.s..ID != "") 
+
+
+# Only Event Code of 0 and 2 corresponds to a successful connection 
+phone_to_antenna <- antennas_info %>%
+  filter(EventCode %in% c(0, 2)) %>%
+  mutate(PhoneId = as.character(PhoneId)) %>%
+  select(t, PhoneId, AntennaId) %>%
+  distinct()
+
+phone_to_antenna <- phone_to_antenna %>%
+  left_join(antennas %>% select(Antenna.ID, Tile.ID), by = c("AntennaId" = "Antenna.ID"))
+
+
+nrow(phone_to_antenna)
+
+
+# Checking data integrity -------------------------------------------------
+
+length(unique(phone_to_antenna$PhoneId)) == one_phone + (2 * two_phones)
+length(unique(antennas_info$AntennaId)) == length(unique(phone_to_antenna$AntennaId))
+
+phone_to_antenna_wide <- phone_to_antenna %>%
+  group_by(t, PhoneId) %>%
+  summarize(Tile.ID = paste(unique(Tile.ID), collapse = ","), .groups = "drop") %>%
+  pivot_wider(names_from = t, values_from = Tile.ID, names_prefix = "t_")
+
+head(phone_to_antenna_wide)
+
+tile_list_original <- phone_to_antenna %>%
+  filter(PhoneId == 80) %>%
+  arrange(t) %>%
+  pull(Tile.ID) %>%
+  as.character()
+
+tile_list_transformed <- phone_to_antenna_wide %>%
+  filter(PhoneId == 80) %>%
+  select(-PhoneId) %>%
+  as.character()
+
+length(tile_list_original)
+length(tile_list_transformed)
+
+setdiff(tile_list_original, tile_list_transformed)
+setdiff(tile_list_transformed, tile_list_original)
+
+list(tile_list_original, tile_list_transformed)
+all.equal(tile_list_original, tile_list_transformed)
+
+
+# Modifying dataset to accurately account for displachement ---------------
+
+#function is needed to be able to show the displacement from distinct tiles over time
+remove_consecutive_duplicates <- function(values) {
+  values[c(TRUE, values[-1] != values[-length(values)])]
+}
+
+non_repeating_df <- phone_to_antenna_wide %>%
+  pivot_longer(cols = starts_with("t_"), names_to = "Time", values_to = "Value") %>%
+  group_by(PhoneId) %>%
+  summarise(Value = list(remove_consecutive_duplicates(Value))) %>%
+  unnest(Value)
+
+print(non_repeating_df)
+
+
+
+# Extracting the count for devices connected to antennas ------------------
+count_df <- non_repeating_df %>%
+  group_by(PhoneId, Value) %>%
+  summarise(Count = n(), .groups = 'drop')
+
+print(count_df)
+
+
+non_repeating_df %>%
+  filter(PhoneId == "100", Value == "1007") %>%
+  nrow()
+
+
+
+value_counts_wide <- non_repeating_df %>%
+  group_by(PhoneId, Value) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+  pivot_wider(names_from = Value, values_from = Count, values_fill = list(Count = 0))
+
+print(value_counts_wide)
+
+
+column_sums <- colSums(value_counts_wide[, -1], na.rm = TRUE)
+
+print(column_sums)
+
+sums_df <- data.frame(Column = names(column_sums), Sum = column_sums)
+
+print(sums_df)
+
+
+antennas$Tile.ID <- as.numeric(antennas$Tile.ID)
+sums_df$Column <- as.numeric(sums_df$Column)
+
+
+dataset1 <- antennas %>%
+  left_join(sums_df, by = c("Tile.ID" = "Column")) %>%
+  select(Antenna.ID, x, y, Tile.ID, device_count = Sum)
+
+print(head(dataset1))
+
+unique(dataset1$Tile.ID)
+
+
+# Calculating the position of each corresponding tile in the grid ---------
+
+
+grid <- read.csv("grid.csv")
+
+origin_x <- grid$Origin.X[1]
+origin_y <- grid$Origin.Y[1]
+x_tile_dim <- grid$X.Tile.Dim[1]
+y_tile_dim <- grid$Y.Tile.Dim[1]
+no_tiles_x <- grid$No.Tiles.X[1]
+no_tiles_y <- grid$No.Tiles.Y[1]
+
+dataset1 <- dataset1 %>%
+  mutate(
+    grid_col = floor((x - origin_x) / x_tile_dim) + 1,
+    grid_row = floor((y - origin_y) / y_tile_dim) + 1
+  )
+
+print(head(dataset1))
+
+
+# Ordering the columns and handling missing values ------------------------
+
+
+dataset1 <- dataset1 %>%
+  select(Antenna.ID, x, y, Tile.ID, grid_row, grid_col, device_count)
+
+print(head(dataset1))
+
+dataset1 <- dataset1 %>%
+  mutate(device_count = ifelse(is.na(device_count), 0, device_count))
+
+print(dataset1)
+
+# Preparing the data for dataset2--------------------------------------------------------
+persons$Tile.ID
+persons$Person.ID
+
+persons_wide <- persons %>%
+  group_by(t, Person.ID) %>%
+  summarize(Tile.ID = paste(unique(Tile.ID), collapse = ","), .groups = "drop") %>%
+  pivot_wider(names_from = t, values_from = Tile.ID, names_prefix = "t_")
+
+head(persons_wide,10)
+
+non_repeating_df <- persons_wide %>%
+  pivot_longer(cols = starts_with("t_"), names_to = "Time", values_to = "Value") %>%
+  group_by(Person.ID) %>%
+  summarise(Value = list(remove_consecutive_duplicates(Value))) %>%
+  unnest(Value)
+
+
+print(non_repeating_df)
+
+count_df <- non_repeating_df %>%
+  group_by(Person.ID, Value) %>%
+  summarise(Count = n(), .groups = 'drop')
+
+print(count_df)
+
+
+non_repeating_df %>%
+  filter(Person.ID == "71", Value == "1090") %>%
+  nrow()
+
+
+value_counts_wide <- non_repeating_df %>%
+  group_by(Person.ID, Value) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+  pivot_wider(names_from = Value, values_from = Count, values_fill = list(Count = 0))
+
+print(value_counts_wide)
+
+
+column_sums <- colSums(value_counts_wide[, -1], na.rm = TRUE)
+
+print(column_sums)
+
+
+sums_df <- data.frame(Column = names(column_sums), Sum = column_sums)
+
+print(sums_df)
+
+
+antennas$Tile.ID <- as.numeric(antennas$Tile.ID)
+sums_df$Column <- as.numeric(sums_df$Column)
+
+
+tiles <- antennas_info %>%
+  group_by(TileId) %>%
+  slice(1) %>%
+  ungroup() %>%
+  arrange(TileId)
+
+nrow(tiles) == length(unique(antennas_info$TileId))
+head(tiles,5)
+
+
+dataset2 <- tiles %>%
+  left_join(sums_df, by = c("TileId" = "Column")) %>%
+  select(TileId, x, y, person_count = Sum)
+
+print(head(dataset2))
+
+
+dataset2 <- dataset2 %>%
+  mutate(
+    grid_col = floor((x - origin_x) / x_tile_dim) + 1,
+    grid_row = floor((y - origin_y) / y_tile_dim) + 1
+  )
+
+print(head(dataset2))
+
+dataset2 <- dataset2 %>%
+  select(TileId, x, y, grid_row, grid_col, person_count)
+
+print(head(dataset2))
+
+dataset2 <- dataset2 %>%
+  mutate(person_count = ifelse(is.na(person_count), 0, person_count))
+
+print(dataset2)
+
+
+# Exporting the dataframes as CSV files -----------------------------------
+export(dataset1, "dataset1.csv")
+export(dataset2, "dataset2.csv")
