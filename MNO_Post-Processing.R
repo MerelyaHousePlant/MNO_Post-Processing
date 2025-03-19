@@ -1,6 +1,9 @@
 library(dplyr)
 library(tidyr)
 library(rio)
+library(ggplot2)
+library(forcats)
+
 # Loading the data --------------------------------------------------------
 
 
@@ -51,11 +54,8 @@ phones <- persons %>%
 phone_to_antenna <- antennas_info %>%
   filter(EventCode %in% c(0, 2)) %>%
   mutate(PhoneId = as.character(PhoneId)) %>%
-  select(t, PhoneId, AntennaId) %>%
+  select(t, PhoneId, AntennaId,TileId) %>%
   distinct()
-
-phone_to_antenna <- phone_to_antenna %>%
-  left_join(antennas %>% select(Antenna.ID, Tile.ID), by = c("AntennaId" = "Antenna.ID"))
 
 
 nrow(phone_to_antenna)
@@ -68,15 +68,15 @@ length(unique(antennas_info$AntennaId)) == length(unique(phone_to_antenna$Antenn
 
 phone_to_antenna_wide <- phone_to_antenna %>%
   group_by(t, PhoneId) %>%
-  summarize(Tile.ID = paste(unique(Tile.ID), collapse = ","), .groups = "drop") %>%
-  pivot_wider(names_from = t, values_from = Tile.ID, names_prefix = "t_")
+  summarize(TileId = paste(unique(TileId), collapse = ","), .groups = "drop") %>%
+  pivot_wider(names_from = t, values_from = TileId, names_prefix = "t_")
 
 head(phone_to_antenna_wide)
 
 tile_list_original <- phone_to_antenna %>%
   filter(PhoneId == 80) %>%
   arrange(t) %>%
-  pull(Tile.ID) %>%
+  pull(TileId) %>%
   as.character()
 
 tile_list_transformed <- phone_to_antenna_wide %>%
@@ -109,18 +109,17 @@ non_repeating_df <- phone_to_antenna_wide %>%
 
 print(non_repeating_df)
 
-
-
 # Extracting the count for devices connected to antennas ------------------
 count_df <- non_repeating_df %>%
   group_by(PhoneId, Value) %>%
   summarise(Count = n(), .groups = 'drop')
 
-print(count_df)
-
+print(count_df[count_df$Value == 1208, ])
+print(count(non_repeating_df[non_repeating_df$Value == 1208, ]))
+print(nrow(antennas_info[antennas_info$TileId == 1208 & antennas_info$EventCode %in% c(0, 2), ]))
 
 non_repeating_df %>%
-  filter(PhoneId == "100", Value == "1007") %>%
+  filter(PhoneId == 100, Value == "1208") %>%
   nrow()
 
 
@@ -194,23 +193,30 @@ persons$Tile.ID
 persons$Person.ID
 
 persons_wide <- persons %>%
-  group_by(t, Person.ID) %>%
+  group_by(t, Person.ID,Mobile.Phone.s..ID) %>%
   summarize(Tile.ID = paste(unique(Tile.ID), collapse = ","), .groups = "drop") %>%
   pivot_wider(names_from = t, values_from = Tile.ID, names_prefix = "t_")
 
-head(persons_wide,10)
+persons_wide$Mobile.Phone.s..ID
+
+
+persons_wide$Mobile.Phone.s..ID <- ifelse(persons_wide$Mobile.Phone.s..ID == "", 0, 
+                                          ifelse(grepl("-", persons_wide$Mobile.Phone.s..ID), 2, 1))
+
+print(persons_wide$Mobile.Phone.s..ID)
 
 non_repeating_df <- persons_wide %>%
   pivot_longer(cols = starts_with("t_"), names_to = "Time", values_to = "Value") %>%
-  group_by(Person.ID) %>%
-  summarise(Value = list(remove_consecutive_duplicates(Value))) %>%
-  unnest(Value)
+  group_by(Person.ID, Mobile.Phone.s..ID) %>%
+  summarise(Value = list(remove_consecutive_duplicates(Value)), .groups = 'drop') %>%
+  unnest(Value) %>%
+  rename(person_phone_count = Mobile.Phone.s..ID)
 
 
 print(non_repeating_df)
 
 count_df <- non_repeating_df %>%
-  group_by(Person.ID, Value) %>%
+  group_by(Person.ID, person_phone_count, Value) %>%
   summarise(Count = n(), .groups = 'drop')
 
 print(count_df)
@@ -222,26 +228,56 @@ non_repeating_df %>%
 
 
 value_counts_wide <- non_repeating_df %>%
-  group_by(Person.ID, Value) %>%
+  group_by(Person.ID, person_phone_count, Value) %>%
   summarise(Count = n(), .groups = 'drop') %>%
   pivot_wider(names_from = Value, values_from = Count, values_fill = list(Count = 0))
 
 print(value_counts_wide)
 
 
-column_sums <- colSums(value_counts_wide[, -1], na.rm = TRUE)
+column_sums <- colSums(value_counts_wide[, -c(1, 2)], na.rm = TRUE)
 
 print(column_sums)
-
 
 sums_df <- data.frame(Column = names(column_sums), Sum = column_sums)
 
 print(sums_df)
 
 
-antennas$Tile.ID <- as.numeric(antennas$Tile.ID)
-sums_df$Column <- as.numeric(sums_df$Column)
 
+connection_counts <- numeric(ncol(value_counts_wide) - 2)  # Exclude Person.ID and person_phone_count
+names(connection_counts) <- colnames(value_counts_wide)[-c(1, 2)]  # Assign TileIDs as names
+
+#code meant to take in account how many devices each person had
+for (tile in names(connection_counts)) {
+  connection_counts[tile] <- sum(
+    ifelse(value_counts_wide[[tile]] > 0, value_counts_wide$person_phone_count * value_counts_wide[[tile]], 0),
+    na.rm = TRUE
+  )
+}
+
+# Create a data frame to store the results
+connection_counts_df <- data.frame(
+  TileID = names(connection_counts),
+  ConnectionCount = connection_counts
+)
+
+# Print the resulting data frame
+head(connection_counts_df)
+
+sums_df <- connection_counts_df %>%
+  inner_join(sums_df, by = c("TileID" = "Column")) %>%
+  select(TileID, ConnectionCount, Sum)
+
+head(sums_df)
+nrow(sums_df)
+
+
+
+
+antennas$Tile.ID <- as.numeric(antennas$Tile.ID)
+sums_df$TileID <- as.numeric(sums_df$TileID)
+sums_df$ConnectionCount <- as.numeric(sums_df$ConnectionCount)
 
 tiles <- antennas_info %>%
   group_by(TileId) %>%
@@ -252,10 +288,13 @@ tiles <- antennas_info %>%
 nrow(tiles) == length(unique(antennas_info$TileId))
 head(tiles,5)
 
+#tiles$TileId <- as.character(tiles$TileId)
+
+typeof(sums_df$TileID)
 
 dataset2 <- tiles %>%
-  left_join(sums_df, by = c("TileId" = "Column")) %>%
-  select(TileId, x, y, person_count = Sum)
+  left_join(sums_df, by = c("TileId" = "TileID")) %>%
+  select(TileId, x, y, person_count = Sum, unique_devices = ConnectionCount)
 
 print(head(dataset2))
 
@@ -269,7 +308,7 @@ dataset2 <- dataset2 %>%
 print(head(dataset2))
 
 dataset2 <- dataset2 %>%
-  select(TileId, x, y, grid_row, grid_col, person_count)
+  select(TileId, x, y, grid_row, grid_col, person_count, unique_devices)
 
 print(head(dataset2))
 
@@ -282,3 +321,80 @@ print(dataset2)
 # Exporting the dataframes as CSV files -----------------------------------
 export(dataset1, "dataset1.csv")
 export(dataset2, "dataset2.csv")
+#export(value_counts_wide, "testis.csv")
+
+
+colnames(dataset1)
+colnames(dataset2)
+
+
+#dataset1$Tile.ID <- as.character(dataset1$Tile.ID)
+
+
+# Plots/Tests -------------------------------------------------------------
+
+
+test_df <- dataset1 %>%
+  inner_join(dataset2, by = c("Tile.ID" = "TileId")) %>%
+  select(Tile.ID, device_count, unique_devices, person_count)
+
+
+head(test_df)
+nrow(test_df)
+
+
+equal_counts_df <- test_df[test_df$antennas_device_count == test_df$persons_device_count, ]
+
+
+print(equal_counts_df)
+
+
+debug1 <- dataset1 %>% select(Tile.ID, device_count)
+debug2 <- test_df %>% select(Tile.ID, device_count)
+setdiff(debug1, debug2)
+
+windows()
+test_df %>%
+  #filter(device_count >= 50) %>%
+  mutate(Tile.ID = as.factor(Tile.ID)) %>%
+  mutate(Tile.ID = fct_reorder(Tile.ID, device_count)) %>%
+  ggplot(aes(x = Tile.ID, y = device_count)) +
+  geom_bar(stat = "identity", fill = "#f68060", alpha = .6, width = .4) +
+  geom_text(
+    aes(label = paste(
+      "There were a total of ", device_count, 
+      "devices connected to this network ",   #, unique_devices, 
+      "among a pool of", person_count, "persons"
+    )), 
+    hjust = -0.1, size = 3, color = "black"
+  ) +
+  coord_flip() +
+  xlab("") +
+  theme_bw()
+
+
+windows()
+dataset2 %>%
+  filter(person_count >= 75) %>%
+  mutate(TileId = as.factor(TileId)) %>%
+  mutate(TileId = fct_reorder(TileId, person_count)) %>%
+  ggplot(aes(x = TileId, y = person_count)) +
+  geom_bar(stat = "identity", fill = "#f68060", alpha = .6, width = .4) +
+  coord_flip() +
+  xlab("") +
+  theme_bw()
+
+
+windows()
+hist(test_df$device_count)
+
+windows()
+hist(test_df$unique_devices, main='Unique Devices')
+
+windows()
+hist(dataset2$person_count)
+
+
+dataset2 <- dataset2 %>% select(TileId,x,y,grid_row,grid_col,person_count)
+
+export(dataset2, 'dataset2.csv')
