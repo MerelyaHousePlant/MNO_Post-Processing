@@ -174,7 +174,6 @@ dataset1 <- dataset1 %>%
 
 print(head(dataset1))
 
-
 # Ordering the columns and handling missing values ------------------------
 
 
@@ -185,6 +184,9 @@ print(head(dataset1))
 
 dataset1 <- dataset1 %>%
   mutate(device_count = ifelse(is.na(device_count), 0, device_count))
+
+dataset1 <- dataset1 %>%
+  distinct(Tile.ID, .keep_all = TRUE)
 
 print(dataset1)
 
@@ -317,6 +319,12 @@ dataset2 <- dataset2 %>%
 
 print(dataset2)
 
+nrow(dataset2)
+
+dataset2 <- dataset2 %>%
+  distinct(TileId, .keep_all = TRUE)
+
+nrow(dataset2)
 
 # Exporting the dataframes as CSV files -----------------------------------
 export(dataset1, "dataset1.csv")
@@ -398,3 +406,5 @@ hist(dataset2$person_count)
 dataset2 <- dataset2 %>% select(TileId,x,y,grid_row,grid_col,person_count)
 
 export(dataset2, 'dataset2.csv')
+
+sum(test_df$device_count)
